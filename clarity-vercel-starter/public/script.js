@@ -20,7 +20,7 @@ async function ask(){
   addMsg('you', text);
   input.value='';
   try{
-    const res = await fetch('https://clarity-mu-green.vercel.app', {
+    const res = await fetch('/api/clarity', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ message: text, mode: voiceSel.value })
