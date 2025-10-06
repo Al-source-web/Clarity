@@ -28,3 +28,4 @@ Users stay on your site; no external ChatGPT UI is used.
 ## Notes
 - Colors are harmonized to Health AI emerald (#004d40). Adjust in `index.html` :root.
 - This starter avoids shopping links and keeps tone safe and clear.
+<!-- trigger rebuild -->
