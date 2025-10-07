@@ -1,12 +1,12 @@
 {
   "name": "clarity-api",
   "version": "1.0.0",
-  "main": "index.js",
+  "main": "clarity.js",
   "license": "MIT",
   "dependencies": {
     "openai": "^4.0.0"
   },
   "scripts": {
-    "start": "node index.js"
+    "start": "node clarity.js"
   }
 }
