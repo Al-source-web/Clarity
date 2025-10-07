@@ -1,3 +1,4 @@
+<script>
 const chat = document.getElementById('chat');
 const input = document.getElementById('q');
 const sendBtn = document.getElementById('send');
@@ -20,10 +21,10 @@ async function ask(){
   addMsg('you', text);
   input.value='';
   try{
-    const res = await fetch('/api/clarity', {
+    const res = await fetch('https://clarity-mu-green.vercel.app/api/clarity', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ message: text, mode: voiceSel.value })
+      body: JSON.stringify({ message: text, mode: voiceSel ? voiceSel.value : "best_friend" })
     });
     if(!res.ok){
       const err = await res.text();
@@ -41,3 +42,4 @@ async function ask(){
 
 sendBtn.addEventListener('click', ask);
 input.addEventListener('keydown', (e)=>{ if(e.key==='Enter') ask(); });
+</script>
