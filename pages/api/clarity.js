@@ -1,82 +1,81 @@
+// /pages/api/clarity.js
+
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
 
-const client = new OpenAI({
+// --- Setup OpenAI client ---
+const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+// --- Setup Supabase client ---
 const supabase = createClient(
-  process.env.SUPABASE_URL,
+  process.env.NEXT_PUBLIC_SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
 export default async function handler(req, res) {
-  // ---- CORS (Squarespace safe)
+  // --- Handle CORS preflight ---
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST")
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
+  if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
+  }
 
-  // ---- Normalize incoming body
-  let message;
   try {
-    if (typeof req.body === "string") {
-      const parsed = JSON.parse(req.body);
-      message = parsed.message || parsed;
-    } else if (typeof req.body === "object" && req.body !== null) {
-      message = req.body.message;
+    const { message } = req.body;
+    if (!message) {
+      return res.status(400).json({ error: "Missing message in body" });
     }
-  } catch (err) {
-    console.error("❌ JSON parse error:", req.body);
-  }
 
-  if (!message || typeof message !== "string") {
-    return res
-      .status(400)
-      .json({ error: "Missing or invalid 'message' field" });
-  }
-
-  // ---- 1. Check Supabase
-  let dbAnswer = null;
-  try {
-    const { data } = await supabase
+    // --- 1. Try Supabase first ---
+    let dbAnswer = null;
+    const { data, error } = await supabase
       .from("ingredients_variants")
-      .select("name, verdict, dao_histamine_signal, citations")
+      .select("name, verdict, dao_histamine_signal, cycle_flag, cycle_notes, citations")
       .ilike("name", `%${message}%`)
       .limit(1);
 
-    if (data && data.length > 0) {
-      const item = data[0];
-      dbAnswer = `Ingredient: ${item.name}\nVerdict: ${item.verdict}\nHistamine/DAO: ${item.dao_histamine_signal}\nCitations: ${item.citations || "N/A"}`;
+    if (error) {
+      console.error("Supabase error:", error);
     }
-  } catch (err) {
-    console.error("Supabase error:", err);
-  }
 
-  // ---- 2. Fallback to GPT if nothing in DB
-  let finalAnswer = dbAnswer;
-  if (!dbAnswer) {
-    try {
-      const completion = await client.chat.completions.create({
-        model: "gpt-4o-mini",
+    if (data && data.length > 0) {
+      const row = data[0];
+      dbAnswer = `Ingredient: ${row.name}
+Verdict: ${row.verdict}
+DAO/Histamine: ${row.dao_histamine_signal || "N/A"}
+Cycle: ${row.cycle_flag || "N/A"} (${row.cycle_notes || ""})
+Citations: ${row.citations && row.citations.length > 0 ? row.citations.join(", ") : "None"}`;
+    }
+
+    // --- 2. If no DB match, ask GPT ---
+    let finalAnswer = dbAnswer;
+    if (!finalAnswer) {
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini", // fast + cheaper
         messages: [
           {
             role: "system",
             content:
-              "You are Clarity, an ingredient safety assistant for maternal, infant, and breastfeeding health. Always be clear, concise, and empathetic.",
+              "You are Clarity, an ingredient safety assistant for maternal, infant, and breastfeeding health. Respond in a warm, clear, and parent-friendly tone. Be concise but reassuring.",
           },
           { role: "user", content: message },
         ],
       });
-      finalAnswer = completion.choices[0].message.content;
-    } catch (err) {
-      console.error("OpenAI error:", err);
-      return res.status(500).json({ error: "AI lookup failed" });
-    }
-  }
 
-  res.status(200).json({ answer: finalAnswer || "No response available." });
+      finalAnswer = completion.choices[0].message.content.trim();
+    }
+
+    return res.status(200).json({ answer: finalAnswer });
+  } catch (err) {
+    console.error("Handler error:", err);
+    return res.status(500).json({ error: "Server error", details: err.message });
+  }
 }
