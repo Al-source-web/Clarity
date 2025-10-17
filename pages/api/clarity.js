@@ -1,3 +1,15 @@
+// Ensure body is parsed as JSON
+let body = {};
+try {
+  body = req.body && typeof req.body === "string" ? JSON.parse(req.body) : req.body;
+} catch (e) {
+  return res.status(400).json({ error: "Invalid JSON" });
+}
+
+const message = body.message;
+if (!message) {
+  return res.status(400).json({ error: "Missing 'message' in request body" });
+}
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
 
