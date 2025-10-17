@@ -1,4 +1,3 @@
-// /pages/api/clarity.js
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
 
@@ -6,7 +5,6 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
 
 export default async function handler(req, res) {
-  // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -19,37 +17,41 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing message in body" });
     }
 
-    // 1) Supabase first
+    // Try multiple matches for disambiguation
     const { data, error } = await supabase
       .from("ingredients_variants")
       .select("name, verdict, dao_histamine_signal, cycle_flag, cycle_notes, citations")
       .ilike("name", `%${message}%`)
-      .limit(1);
+      .limit(5);
 
     if (error) console.error("Supabase error:", error);
 
     if (data && data.length) {
-      const row = data[0];
-      // Normalize shapes for the widget
+      // top result is the card; rest become “did you mean?”
+      const primary = data[0];
+      const others = data.slice(1).map(r => r.name);
+
       const record = {
-        name: row.name,
-        verdict: row.verdict,                                         // "safe" | "caution" | "avoid"
-        dao: row.dao_histamine_signal || "Unknown",                    // "Yes" | "No" | "Maybe" | "Unknown"
-        cycle: row.cycle_flag || "N/A",
-        cycle_notes: row.cycle_notes || "",
-        citations: Array.isArray(row.citations) ? row.citations : (row.citations ? [row.citations] : [])
+        name: primary.name,
+        verdict: primary.verdict,
+        dao: primary.dao_histamine_signal || "Unknown",
+        cycle: primary.cycle_flag || "N/A",
+        cycle_notes: primary.cycle_notes || "",
+        citations: Array.isArray(primary.citations) ? primary.citations :
+                   (primary.citations ? [primary.citations] : []),
+        disambig: others
       };
       return res.status(200).json({ kind: "db", record });
     }
 
-    // 2) GPT fallback (tone + coaching)
+    // GPT fallback (tone + coaching)
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
         {
           role: "system",
           content:
-            "You are Clarity, an ingredient-safety assistant for maternal/infant/breastfeeding health. Friendly, concise, reassuring. If evidence is weak, say so and suggest safer swaps."
+            "You are Clarity, an ingredient-safety assistant for maternal/infant/breastfeeding health. Friendly, concise, evidence-aware. If evidence is weak, say so and suggest safer swaps."
         },
         { role: "user", content: message }
       ],
