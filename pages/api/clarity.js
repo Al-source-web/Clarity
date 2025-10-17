@@ -1,83 +1,82 @@
-// /pages/api/clarity.js
-
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
 
-const openai = new OpenAI({
+const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_ANON_KEY
+  process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
 export default async function handler(req, res) {
-  // CORS headers
+  // ---- CORS (Squarespace safe)
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
   if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+  if (req.method !== "POST")
+    return res.status(405).json({ error: "Method not allowed" });
 
-  let body = {};
+  // ---- Normalize incoming body
+  let message;
   try {
     if (typeof req.body === "string") {
-      body = JSON.parse(req.body);
-    } else {
-      body = req.body;
+      const parsed = JSON.parse(req.body);
+      message = parsed.message || parsed;
+    } else if (typeof req.body === "object" && req.body !== null) {
+      message = req.body.message;
     }
-  } catch (e) {
-    console.error("❌ JSON parse error. Raw body:", req.body);
-    return res.status(400).json({ error: "Invalid JSON format" });
+  } catch (err) {
+    console.error("❌ JSON parse error:", req.body);
   }
 
-  const message = body?.message?.trim();
-  if (!message) {
-    console.error("❌ No message field. Body received:", body);
-    return res.status(400).json({ error: "Missing 'message' in request body" });
+  if (!message || typeof message !== "string") {
+    return res
+      .status(400)
+      .json({ error: "Missing or invalid 'message' field" });
   }
 
+  // ---- 1. Check Supabase
+  let dbAnswer = null;
   try {
-    // 1. Supabase lookup
-    const { data, error } = await supabase
+    const { data } = await supabase
       .from("ingredients_variants")
       .select("name, verdict, dao_histamine_signal, citations")
       .ilike("name", `%${message}%`)
       .limit(1);
 
-    if (error) console.error("Supabase error:", error);
-
     if (data && data.length > 0) {
       const item = data[0];
-      return res.status(200).json({
-        answer: `Database hit:\n\n**${item.name}** → Verdict: ${item.verdict}\nDAO Signal: ${item.dao_histamine_signal || "N/A"}\n\nCitations: ${
-          item.citations?.length ? JSON.stringify(item.citations) : "none available"
-        }`,
-        source: "supabase",
-      });
+      dbAnswer = `Ingredient: ${item.name}\nVerdict: ${item.verdict}\nHistamine/DAO: ${item.dao_histamine_signal}\nCitations: ${item.citations || "N/A"}`;
     }
-
-    // 2. GPT fallback
-    const gpt = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        {
-          role: "system",
-          content:
-            "You are Clarity, an ingredient safety assistant for maternal, infant, and breastfeeding health. Be warm, concise, and practical.",
-        },
-        { role: "user", content: message },
-      ],
-      max_tokens: 300,
-    });
-
-    const reply = gpt.choices[0]?.message?.content || "No response.";
-    return res.status(200).json({ answer: reply, source: "openai" });
-
   } catch (err) {
-    console.error("❌ Server error:", err);
-    return res.status(500).json({ error: "Server error" });
+    console.error("Supabase error:", err);
   }
+
+  // ---- 2. Fallback to GPT if nothing in DB
+  let finalAnswer = dbAnswer;
+  if (!dbAnswer) {
+    try {
+      const completion = await client.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are Clarity, an ingredient safety assistant for maternal, infant, and breastfeeding health. Always be clear, concise, and empathetic.",
+          },
+          { role: "user", content: message },
+        ],
+      });
+      finalAnswer = completion.choices[0].message.content;
+    } catch (err) {
+      console.error("OpenAI error:", err);
+      return res.status(500).json({ error: "AI lookup failed" });
+    }
+  }
+
+  res.status(200).json({ answer: finalAnswer || "No response available." });
 }
