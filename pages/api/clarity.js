@@ -75,6 +75,25 @@ function buildFollowups(base = "", verdict = null, mode = "ingredient") {
   ];
 }
 
+/* ------------------ history helpers (continuity + logging) ------------------ */
+function toModelHistory(raw = []) {
+  // Expect array of {role, content}; keep last 3 turns, cap long content
+  if (!Array.isArray(raw)) return [];
+  const MAX_TURNS = 3;
+  const TRIMMED = raw.slice(-MAX_TURNS).map(m => {
+    const role = m?.role === "assistant" ? "assistant" : "user";
+    let content = (m?.content || "").toString();
+    if (content.length > 3000) content = content.slice(0, 3000) + "…";
+    return { role, content };
+  });
+  return TRIMMED;
+}
+
+function makeRequestId() {
+  // lightweight unique-ish id for joining logs
+  return `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,8)}`;
+}
+
 /* ---------- Prompts ---------- */
 function buildSystemPrompt() {
   return `
@@ -83,11 +102,11 @@ Your role is to answer with empathy, continuity, and clarity.
 
 Guidelines:
 - Tone: warm, conversational, supportive. Empathetic when user is anxious. Evidence-based but human.
-- Style: short paragraphs, natural flow, not rigid bullets. Insert small emoji anchors (💧 🤱 💤 ⚠️) to keep it warm.
-- Continuity: always keep in mind what was just said; build follow-ups that flow naturally from conversation.
+- Style: short paragraphs, natural flow, not rigid bullets. Insert small emoji anchors (💧 🤱 💤 ⚠️) sparingly to keep it warm.
+- Continuity: build on what was just said; ask follow-ups that feel like the next natural question.
 - If evidence is weak, say so and suggest safer swaps.
 - Always add 1–2 context-aware follow-up questions (e.g., about meds, symptoms, goals). They should feel like invitations to continue, not generic.
-- No retailer links. If an ingredient is mentioned, allude to healthai.com/clarity/<slug>.
+- No retailer links. If an ingredient is mentioned, you may allude to healthai.com/clarity/<slug>.
 
 Return JSON only:
 
@@ -115,7 +134,7 @@ Rules:
 async function callGPTJSON(message, history = []) {
   const messages = [
     { role: "system", content: buildSystemPrompt() },
-    ...history,
+    ...toModelHistory(history),
     { role: "user", content: buildUserPrompt(message) }
   ];
 
@@ -142,6 +161,25 @@ async function callGPTJSON(message, history = []) {
   }
 }
 
+/* ------------------ logging to Supabase (non-blocking) ------------------ */
+async function logInteraction({ request_id, user_query, history, kind, model_response, ui }) {
+  try {
+    await supabase.from("clarity_interactions").insert([
+      {
+        request_id,
+        user_query,
+        history: toModelHistory(history),
+        kind,
+        model_response,
+        ui
+      }
+    ]);
+  } catch (e) {
+    // Never crash the request on logging failure
+    console.error("logInteraction error:", e?.message || e);
+  }
+}
+
 /* -------------------------- main handler --------------------------- */
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -149,6 +187,8 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
+  const request_id = makeRequestId();
 
   try {
     const { message, history } = req.body || {};
@@ -159,11 +199,13 @@ export default async function handler(req, res) {
     const baseFromUser = baseIngredientFromMessage(message);
 
     /* ----------------------- Supabase lookup ----------------------- */
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("ingredients_variants")
       .select("name, verdict, dao_histamine_signal, cycle_flag, cycle_notes, citations")
       .ilike("name", `%${message}%`)
       .limit(5);
+
+    if (error) console.error("Supabase error:", error);
 
     if (data && data.length) {
       const primary = data[0];
@@ -198,6 +240,16 @@ export default async function handler(req, res) {
         followups: buildFollowups(base, verdictNormalized, "ingredient")
       };
 
+      // Non-blocking log
+      logInteraction({
+        request_id,
+        user_query: message,
+        history,
+        kind: "db",
+        model_response: record,
+        ui
+      });
+
       return res.status(200).json({ kind: "db", record, ui });
     }
 
@@ -225,10 +277,20 @@ export default async function handler(req, res) {
       followups: buildFollowups(base, verdictNormalized, j.mode)
     };
 
+    // Non-blocking log
+    logInteraction({
+      request_id,
+      user_query: message,
+      history,
+      kind: "gpt",
+      model_response: j,   // store the raw structured JSON from the model
+      ui
+    });
+
     return res.status(200).json({ kind: "gpt", answer, ui });
 
   } catch (err) {
     console.error("Handler error:", err);
-    return res.status(500).json({ error: "Server error", details: err.message });
+    return res.status(500).json({ error: "Server error", details: err.message, request_id });
   }
 }
