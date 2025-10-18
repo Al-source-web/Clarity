@@ -77,7 +77,6 @@ function buildFollowups(base = "", verdict = null, mode = "ingredient") {
 
 /* ------------------ history helpers (continuity + logging) ------------------ */
 function toModelHistory(raw = []) {
-  // Expect array of {role, content}; keep last 3 turns, cap long content
   if (!Array.isArray(raw)) return [];
   const MAX_TURNS = 3;
   const TRIMMED = raw.slice(-MAX_TURNS).map(m => {
@@ -90,7 +89,6 @@ function toModelHistory(raw = []) {
 }
 
 function makeRequestId() {
-  // lightweight unique-ish id for joining logs
   return `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,8)}`;
 }
 
@@ -105,7 +103,9 @@ Guidelines:
 - Style: short paragraphs, natural flow, not rigid bullets. Insert small emoji anchors (💧 🤱 💤 ⚠️) sparingly to keep it warm.
 - Continuity: build on what was just said; ask follow-ups that feel like the next natural question.
 - If evidence is weak, say so and suggest safer swaps.
+- Only advise consulting a provider if the ingredient is clearly risky, not as a generic disclaimer.
 - Always add 1–2 context-aware follow-up questions (e.g., about meds, symptoms, goals). They should feel like invitations to continue, not generic.
+- If an ingredient has cross-reactivity with other foods or compounds, explicitly fill "cross_reactivity" with a concise note (e.g., "goat’s milk, sheep’s milk").
 - No retailer links. If an ingredient is mentioned, you may allude to healthai.com/clarity/<slug>.
 
 Return JSON only:
@@ -117,7 +117,8 @@ Return JSON only:
   "friendly": "string",
   "scientific": "string",
   "closing": "string",
-  "followups": ["string","string"]
+  "followups": ["string","string"],
+  "cross_reactivity": "string"
 }
 `.trim();
 }
@@ -156,7 +157,8 @@ async function callGPTJSON(message, history = []) {
       friendly: "I don’t have a perfect answer yet, but I can think it through with you 💭",
       scientific: "",
       closing: "You’re doing a lot — I’m here to help make this easier 💚",
-      followups: ["Want me to suggest safer alternatives?", "Should we adjust this around your meds or sleep?"]
+      followups: ["Want me to suggest safer alternatives?", "Should we adjust this around your meds or sleep?"],
+      cross_reactivity: ""
     };
   }
 }
@@ -175,7 +177,6 @@ async function logInteraction({ request_id, user_query, history, kind, model_res
       }
     ]);
   } catch (e) {
-    // Never crash the request on logging failure
     console.error("logInteraction error:", e?.message || e);
   }
 }
@@ -201,7 +202,7 @@ export default async function handler(req, res) {
     /* ----------------------- Supabase lookup ----------------------- */
     const { data, error } = await supabase
       .from("ingredients_variants")
-      .select("name, verdict, dao_histamine_signal, cycle_flag, cycle_notes, citations")
+      .select("name, verdict, dao_histamine_signal, cycle_flag, cycle_notes, citations, cross_reactivity")
       .ilike("name", `%${message}%`)
       .limit(5);
 
@@ -218,7 +219,8 @@ export default async function handler(req, res) {
         dao,
         cycle,
         cycle_notes: primary.cycle_notes || "",
-        citations: Array.isArray(primary.citations) ? primary.citations : (primary.citations ? [primary.citations] : [])
+        citations: Array.isArray(primary.citations) ? primary.citations : (primary.citations ? [primary.citations] : []),
+        cross_reactivity: primary.cross_reactivity || ""
       };
 
       const verdictNormalized = normalizeVerdict(primary.verdict);
@@ -237,10 +239,10 @@ export default async function handler(req, res) {
           cycle: cycle === "N/A"
         },
         engagement: buildEngagement(verdictNormalized, "ingredient"),
-        followups: buildFollowups(base, verdictNormalized, "ingredient")
+        followups: buildFollowups(base, verdictNormalized, "ingredient"),
+        cross_reactivity: record.cross_reactivity
       };
 
-      // Non-blocking log
       logInteraction({
         request_id,
         user_query: message,
@@ -274,16 +276,16 @@ export default async function handler(req, res) {
       show_chip: j.mode === "ingredient" && Boolean(verdictNormalized),
       hide_fields: { dao: true, cycle: true },
       engagement: buildEngagement(verdictNormalized, j.mode),
-      followups: buildFollowups(base, verdictNormalized, j.mode)
+      followups: buildFollowups(base, verdictNormalized, j.mode),
+      cross_reactivity: j.cross_reactivity || ""
     };
 
-    // Non-blocking log
     logInteraction({
       request_id,
       user_query: message,
       history,
       kind: "gpt",
-      model_response: j,   // store the raw structured JSON from the model
+      model_response: j,
       ui
     });
 
