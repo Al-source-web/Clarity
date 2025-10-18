@@ -14,42 +14,57 @@ function slugifyForClarityPath(s = "") {
     .replace(/\s+/g, "-");
 }
 
+// verdict chip UI
+function verdictChip(verdict) {
+  const v = (verdict || "").toLowerCase();
+  if (v.includes("avoid") || v.includes("not safe") || v.includes("harmful")) {
+    return `<span style="display:inline-flex;align-items:center;gap:6px;
+      background:#ffefef;color:#b42318;border:1px solid #f5b5b1;
+      border-radius:999px;padding:2px 8px;font-size:13px;font-weight:700;">
+      🔴 Avoid</span>`;
+  }
+  if (v.includes("safe") || v.includes("generally safe")) {
+    return `<span style="display:inline-flex;align-items:center;gap:6px;
+      background:#e9f9f1;color:#146c43;border:1px solid #b7ebce;
+      border-radius:999px;padding:2px 8px;font-size:13px;font-weight:700;">
+      🟢 Safe</span>`;
+  }
+  return `<span style="display:inline-flex;align-items:center;gap:6px;
+    background:#fff6e6;color:#9a6700;border:1px solid #ffdd99;
+    border-radius:999px;padding:2px 8px;font-size:13px;font-weight:700;">
+    🟡 Caution</span>`;
+}
+
 function buildSystemPrompt() {
   return `
-You are Clarity, a maternal and infant ingredient risk assistant.  
-Your job is to evaluate supplement and food ingredients for breastfeeding safety, histamine triggers, and usage guidance.  
+You are Clarity, a maternal and infant ingredient risk assistant. 
+Your job is to evaluate supplement and food ingredients for breastfeeding safety, histamine triggers, and usage guidance. 
 
-TONE & MODES:  
-- 💬 Warm/supportive when user is anxious, precise/evidence-based when they want detail.  
-- Prefer short paragraphs with line breaks, not long numbered lists (unless user asks for steps).  
-- Use occasional emoji anchors (💧 hydration, 🤱 nursing, 💤 rest) to make advice more approachable — but do not mix numbers with emoji.  
+Tone should dynamically switch: warm/supportive when user is anxious, precise/evidence-based when they want details. 
+Prefer warm short paragraphs with line breaks instead of numbered lists, unless the user explicitly asks for step-by-step instructions. 
+Use occasional emoji anchors (💧 hydration, 🤱 nursing, 💤 rest) to make advice friendlier — but do not mix numbers with emoji. 
+If evidence is weak, say so clearly and suggest safer swaps. 
 
-CONTENT RULES:  
-- If ingredient: give Safe / Caution / Avoid verdict with reasoning.  
-- If wellness/symptom: skip verdict; give concrete ideas.  
-- If evidence is weak, say so clearly and suggest safer swaps.  
-- Always gently check for medication or supplement use that could cause interactions.  
-- Never push purchases. If user asks “where to buy,” redirect to healthai.com/clarity.  
+At the end, include 1–2 empathetic follow-up questions that feel human (e.g. "Would you like stress-management techniques tailored for new parents?" or "Should I explain which galactagogues have stronger evidence?"). 
+Always check gently if the user is taking medications or supplements to flag possible interactions. 
+Avoid generic closings like "Want to know more?" — make follow-ups context-aware and specific.
 
-STRUCTURE:  
-1) Ingredient or Topic Name  
-2) 💬 Friendly supportive response  
-3) 🔬 Scientific evidence-based response  
-4) A warm, compassionate closing line  
-5) 1–2 context-aware follow-up questions (never generic like “Want to know more?” — instead:  
-   “Would you like stress-management techniques tailored for new parents?”  
-   “Should I explain which galactagogues have stronger evidence?”)  
-
-Make answers readable on mobile. Always balance warmth with clarity.`;
+OUTPUT FORMAT:
+1) Ingredient or Topic Name
+2) 💬 friendly response
+3) 🔬 short scientific response
+4) A warm compassionate closing line
+5) 1–3 organic follow-up prompts/questions (no titles, just sentences)`;
 }
 
 function buildUserPrompt(message) {
   return `User question: ${message}
 
 Follow the system rules:
-- If wellness/symptom, skip verdict.
-- If ingredient safety, include a verdict early.
-- End with 1–2 natural, context-aware follow-up questions.`;
+- If wellness/symptom, skip verdict chips.
+- If ingredient safety, include a verdict chip early.
+- Remove markdown headings (###) and use plain bold or inline text.
+- End with 1–3 natural, context-aware follow-up questions.`;
 }
 
 async function callGPTFallback(message) {
@@ -64,13 +79,29 @@ async function callGPTFallback(message) {
 
   let text = completion.choices?.[0]?.message?.content?.trim() || "";
 
-  // Add internal link if it looks like an ingredient query
+  // strip markdown headings like ### Something
+  text = text.replace(/^###\s*/gm, "").replace(/^##\s*/gm, "").replace(/^#\s*/gm, "");
+
+  // Decide if this looks like an ingredient query
   const maybeOneWord = message.trim().split(/\s+/).length === 1;
   const looksLikeIngredient =
     maybeOneWord ||
-    /(supplement|vitamin|herb|powder|extract|capsule|tea|food|ingredient)/i.test(message);
+    /(supplement|vitamin|herb|powder|extract|capsule|tea|food|ingredient|safe|avoid|caution)/i.test(message);
 
   if (looksLikeIngredient) {
+    // prepend verdict chip if GPT text includes Safe/Avoid/Caution
+    let verdict = null;
+    if (/avoid/i.test(text)) verdict = "Avoid";
+    else if (/safe/i.test(text)) verdict = "Safe";
+    else if (/caution/i.test(text)) verdict = "Caution";
+
+    if (verdict) {
+      text =
+        `<div style="margin-bottom:8px;">${verdictChip(verdict)}</div>` +
+        text;
+    }
+
+    // Add internal link
     const slug = slugifyForClarityPath(message);
     const url = `https://healthai.com/clarity/${slug}`;
     if (!text.includes("healthai.com/clarity/")) {
