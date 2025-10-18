@@ -14,12 +14,34 @@ function slugifyForClarityPath(s = "") {
     .replace(/\s+/g, "-");
 }
 
+// NEW: mirror frontend’s “base ingredient” extractor
+function baseIngredientFromMessage(q = "") {
+  if (!q) return "";
+  const first = q.split(/[-—:]/)[0].trim();
+  const words = first.split(/\s+/).filter(Boolean);
+  return words.length <= 3 ? first : words.slice(0, 3).join(" ");
+}
+
 function normalizeVerdict(v = "") {
   const t = (v || "").toLowerCase();
   if (!t) return null;
-  if (t.includes("avoid") || t.includes("not safe") || t.includes("not recommended") || t.includes("discouraged") || t.includes("harmful")) return "Avoid";
+  if (
+    t.includes("avoid") ||
+    t.includes("not safe") ||
+    t.includes("not recommended") ||
+    t.includes("discouraged") ||
+    t.includes("harmful")
+  ) return "Avoid";
   if (t.includes("safe") || t.includes("generally safe")) return "Safe";
   return "Caution";
+}
+
+function looksLikeIngredientQuery(message = "") {
+  const oneWord = message.trim().split(/\s+/).length === 1;
+  return (
+    oneWord ||
+    /(ingredient|supplement|vitamin|herb|powder|extract|capsule|tea|food|safe|avoid|caution)/i.test(message)
+  );
 }
 
 function buildEngagement(verdictNormalized, mode) {
@@ -31,12 +53,40 @@ function buildEngagement(verdictNormalized, mode) {
   return "🤔 Want safer alternatives or usage limits? Ask for more details!";
 }
 
-function looksLikeIngredientQuery(message = "") {
-  const oneWord = message.trim().split(/\s+/).length === 1;
-  return (
-    oneWord ||
-    /(ingredient|supplement|vitamin|herb|powder|extract|capsule|tea|food|safe|avoid)/i.test(message)
-  );
+// NEW: context-aware follow-ups (same spirit as frontend)
+const HARM_SET = new Set(["tobacco","nicotine","alcohol","ethanol","cannabis","weed","marijuana","vape","vaping"]);
+function buildFollowups(base = "", verdict = null, mode = "ingredient") {
+  const b = (base || "").toLowerCase().trim();
+  const v = (verdict || "").toLowerCase();
+
+  if (mode === "wellness") {
+    return [
+      "Want practical ideas that fit your routine and sleep?",
+      "Should we tailor options around any meds or supplements you’re taking?"
+    ];
+  }
+
+  // Ingredient path
+  if (HARM_SET.has(b) || v.includes("avoid") || v.includes("not safe")) {
+    return [
+      "Safer alternatives or usage limits",
+      "Ways to reduce exposure / quitting supports",
+      "Why it’s risky + what to try instead"
+    ];
+  }
+  if (v.includes("safe")) {
+    return [
+      "Dosage, timing, or long-term use",
+      "Quick hydration + snack ideas that really help",
+      "Possible interactions with meds/supplements"
+    ];
+  }
+  // Caution / unsure
+  return [
+    "Safer alternatives or usage limits",
+    "Foods that may support supply",
+    "Stress-management tips tailored for new parents"
+  ];
 }
 
 /* ---------- System + User prompts for consistent GPT fallback ------ */
@@ -48,21 +98,20 @@ Your job is to evaluate supplement and food ingredients for breastfeeding safety
 Tone + format:
 - Switch tone: warm/supportive if user seems anxious; precise/evidence-based if they want details.
 - Prefer short paragraphs with line breaks; avoid numbered lists unless user explicitly asks.
-- You may use a few emoji anchors (💧 hydration, 🤱 nursing, 💤 rest) but do not mix numbers with emoji.
+- Use small emoji anchors sparingly (💧 🤱 💤); do not mix numbers with emoji.
 - If evidence is weak, say so and suggest safer swaps.
 - Always include 1–2 empathetic, context-aware follow-up questions (not generic). Ask gently if they take medications/supplements to flag interactions.
 - No retailer links. If an ingredient is mentioned, you may allude to an article at healthai.com/clarity/<slug>.
 
 Return ONLY strict JSON matching this schema (no prose), keys exactly as written:
-
 {
   "mode": "ingredient" | "wellness",
-  "title": "string",                       // short topic/ingredient name
+  "title": "string",
   "verdict": "Safe" | "Caution" | "Avoid" | null,
-  "friendly": "string",                    // warm, short paragraphs, no numbered lists
-  "scientific": "string",                  // brief, specific, evidence-aware
-  "closing": "string",                     // one compassionate closing line
-  "followups": ["string", "string"]        // 1-3 specific, empathetic follow-up questions
+  "friendly": "string",
+  "scientific": "string",
+  "closing": "string",
+  "followups": ["string","string"]
 }
 `.trim();
 }
@@ -72,7 +121,7 @@ function buildUserPrompt(message) {
 Rules:
 - If wellness/symptom, set "mode" to "wellness" and "verdict": null.
 - If ingredient safety, set "mode" to "ingredient" and include a clear "verdict".
-- Keep paragraphs short; avoid markdown headings and numbered lists.`;
+- Keep paragraphs short; avoid markdown headings and numbered lists.`.trim();
 }
 
 /* ------------------ GPT call with JSON enforcement ------------------ */
@@ -92,7 +141,6 @@ async function callGPTJSON(message) {
   try {
     parsed = JSON.parse(raw);
   } catch {
-    // As a last resort, return a minimal structure
     parsed = {
       mode: looksLikeIngredientQuery(message) ? "ingredient" : "wellness",
       title: message.trim().slice(0, 60) || "Guidance",
@@ -100,7 +148,10 @@ async function callGPTJSON(message) {
       friendly: "I don’t have a perfect answer yet, but I can help think it through with you.",
       scientific: "",
       closing: "You’re doing a lot — I’m here to help make this easier.",
-      followups: ["Would you like me to suggest a safer alternative?", "Should we tailor this to your routine or meds?"]
+      followups: [
+        "Would you like usage limits or safer alternatives?",
+        "Should we tailor this to your routine or meds?"
+      ]
     };
   }
   return parsed;
@@ -120,6 +171,9 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing message in body" });
     }
 
+    const baseFromUser = baseIngredientFromMessage(message);
+    const looksIngredient = looksLikeIngredientQuery(message);
+
     /* ----------------------- Supabase lookup ----------------------- */
     const { data, error } = await supabase
       .from("ingredients_variants")
@@ -135,7 +189,6 @@ export default async function handler(req, res) {
 
       const dao = primary.dao_histamine_signal || "Unknown";
       const cycle = primary.cycle_flag || "N/A";
-
       const record = {
         name: primary.name,
         verdict: primary.verdict,
@@ -150,19 +203,22 @@ export default async function handler(req, res) {
 
       // UI metadata for consistent rendering across UIs
       const verdictNormalized = normalizeVerdict(primary.verdict);
+      const base = primary.name || baseFromUser;
+      const article_url = primary.name ? `https://healthai.com/clarity/${slugifyForClarityPath(primary.name)}` : null;
+
       const ui = {
         mode: "ingredient",
-        verdict_normalized: verdictNormalized,         // "Safe" | "Caution" | "Avoid" | null
-        show_chip: Boolean(verdictNormalized),
+        header: "Ingredient Check",
+        base,
+        article_url,
+        verdict_normalized: verdictNormalized,   // "Safe" | "Caution" | "Avoid" | null
+        show_chip: Boolean(verdictNormalized),   // ensure chip displays for DB path
         hide_fields: {
           dao: dao === "Unknown",
           cycle: cycle === "N/A"
         },
         engagement: buildEngagement(verdictNormalized, "ingredient"),
-        followups: [
-          "Would you like usage limits or safer alternatives?",
-          "Are you taking any meds or supplements I should consider?"
-        ]
+        followups: buildFollowups(base, verdictNormalized, "ingredient")
       };
 
       return res.status(200).json({ kind: "db", record, ui });
@@ -171,31 +227,36 @@ export default async function handler(req, res) {
     /* ------------------------- GPT fallback ------------------------ */
     const j = await callGPTJSON(message);
 
-    // Build simple, mobile-friendly combined text (for legacy front-ends)
     const friendly = j.friendly?.trim() || "";
     const scientific = j.scientific?.trim() ? `\n\n${j.scientific.trim()}` : "";
     const closing = j.closing?.trim() ? `\n\n${j.closing.trim()}` : "";
     const followupsTxt = (Array.isArray(j.followups) && j.followups.length)
       ? `\n\n• ${j.followups.join("\n• ")}`
       : "";
-
     let answer = `${j.title}\n\n${friendly}${scientific}${closing}${followupsTxt}`.trim();
 
-    // Soft internal link hint for ingredients
-    if (j.mode === "ingredient" && looksLikeIngredientQuery(message)) {
+    let article_url = null;
+    if (j.mode === "ingredient" && looksIngredient) {
       const slug = slugifyForClarityPath(j.title || message);
       if (slug) {
-        answer += `\n\n_(More on this soon at https://healthai.com/clarity/${slug}.)_`;
+        article_url = `https://healthai.com/clarity/${slug}`;
+        answer += `\n\n_(More on this soon at ${article_url}.)_`;
       }
     }
 
+    const verdictNormalized = j.mode === "ingredient" ? normalizeVerdict(j.verdict) : null;
+    const base = j.mode === "ingredient" ? baseIngredientFromMessage(j.title || message) : baseFromUser;
+
     const ui = {
       mode: j.mode === "ingredient" ? "ingredient" : "wellness",
-      verdict_normalized: j.verdict || null,
-      show_chip: j.mode === "ingredient" && Boolean(j.verdict),
-      hide_fields: { dao: true, cycle: true }, // GPT path usually has no DAO/cycle
-      engagement: buildEngagement(j.verdict || null, j.mode),
-      followups: Array.isArray(j.followups) ? j.followups.slice(0, 3) : []
+      header: j.mode === "ingredient" ? "Ingredient Check" : "Wellness Guidance",
+      base,
+      article_url,
+      verdict_normalized: verdictNormalized,
+      show_chip: j.mode === "ingredient" && Boolean(verdictNormalized),
+      hide_fields: { dao: true, cycle: true }, // GPT path usually has no DAO/cycle fields
+      engagement: buildEngagement(verdictNormalized, j.mode),
+      followups: buildFollowups(base, verdictNormalized, j.mode)
     };
 
     return res.status(200).json({ kind: "gpt", answer, ui });
