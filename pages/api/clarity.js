@@ -208,7 +208,15 @@ export default async function handler(req, res) {
 
     const baseFromUser = baseIngredientFromMessage(message);
 
-    /* ----------------------- Supabase lookup ----------------------- */
+    /* ----------------------- (ADDED) optional pagination params ----------------------- */
+    // NOTE: This is additive; it does NOT remove your existing query below.
+    // If a client sends { page: 2 }, we’ll use a paginated query; otherwise we keep your original query.
+    const PAGE_SIZE = 20;
+    const pageParam = Number.isInteger(req.body?.page) ? req.body.page : null;
+    const from = pageParam ? (pageParam - 1) * PAGE_SIZE : null;
+    const to = pageParam ? (from + PAGE_SIZE - 1) : null;
+
+    /* ----------------------- Supabase lookup (your original query) ----------------------- */
     const { data, error } = await supabase
       .from("ingredients_variants")
       .select("name, verdict, dao_histamine_signal, cycle_flag, cycle_notes, citations, cross_reactivity")
@@ -217,8 +225,31 @@ export default async function handler(req, res) {
 
     if (error) console.error("Supabase error:", error);
 
-    if (data && data.length) {
-      const primary = data[0];
+    /* ----------------------- (ADDED) Paginated lookup if page provided ----------------------- */
+    let paged = null;
+    let pagedError = null;
+    let totalPlanned = null;
+
+    if (pageParam) {
+      const pagedResult = await supabase
+        .from("ingredients_variants")
+        .select("id, name, verdict, dao_histamine_signal, cycle_flag, cycle_notes, citations, cross_reactivity", { count: "planned" })
+        .ilike("name", `%${message}%`)
+        .order("name")           // stable order for pagination
+        .range(from, to);        // use calculated window
+
+      paged = pagedResult.data || null;
+      pagedError = pagedResult.error || null;
+      totalPlanned = pagedResult.count ?? null;
+
+      if (pagedError) console.error("Supabase paginated error:", pagedError);
+    }
+
+    // Decide which dataset to use for the response:
+    const dataToUse = (Array.isArray(paged) && paged.length) ? paged : data;
+
+    if (dataToUse && dataToUse.length) {
+      const primary = dataToUse[0];
       const dao = primary.dao_histamine_signal || "Unknown";
       const cycle = primary.cycle_flag || "N/A";
 
@@ -251,6 +282,15 @@ export default async function handler(req, res) {
         followups: buildFollowups(base, verdictNormalized, "ingredient"),
         cross_reactivity: record.cross_reactivity
       };
+
+      // (ADDED) include pagination metadata only when page was provided
+      if (pageParam) {
+        ui.pagination = {
+          current_page: pageParam,
+          page_size: PAGE_SIZE,
+          total_count: totalPlanned
+        };
+      }
 
       logInteraction({
         request_id,
