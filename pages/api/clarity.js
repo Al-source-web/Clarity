@@ -1,6 +1,8 @@
+// pages/api/clarity.js
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
 
+/* ----------------------------- clients ----------------------------- */
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
 
@@ -92,7 +94,33 @@ function makeRequestId() {
   return `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,8)}`;
 }
 
-/* ---------- Prompts ---------- */
+/* -------------------- record normalization (no UI crashes) -------------------- */
+function ensureArray(v) {
+  if (Array.isArray(v)) return v;
+  if (v === null || v === undefined || v === "") return [];
+  return [v];
+}
+
+function normalizeRecord(record = {}) {
+  return {
+    id: record.id,
+    name: record.name || "Unknown",
+    verdict: record.verdict || "unknown",
+    dao: record.dao_histamine_signal || "unspecified",
+    cycle: record.cycle_flag || "unspecified",
+    cycle_notes: record.cycle_notes || "unspecified",
+    citations: ensureArray(record.citations),
+    cross_reactivity: ensureArray(record.cross_reactivity),
+    hormone_modulation_note: record.hormone_modulation_note || "unspecified",
+    dao_mechanism: record.dao_mechanism || "unspecified",
+    dao_notes: record.dao_notes || "unspecified",
+    trust_signals: record.trust_signals || "weak",
+    confidence: typeof record.confidence === "number" ? record.confidence : 0.0,
+    source_type: record.source_type || "unspecified"
+  };
+}
+
+/* ----------------------------- prompts ----------------------------- */
 function buildSystemPrompt() {
   return `
 You are Clarity, a maternal and infant ingredient safety companion.
@@ -100,25 +128,14 @@ Your role is to answer with empathy, continuity, and clarity.
 
 Guidelines:
 - Tone: warm, conversational, supportive. Empathetic when user is anxious. Evidence-based but human.
-- Style: short paragraphs, natural flow, not rigid bullets. Insert small emoji anchors (💧 🤱 💤 ⚠️) sparingly to keep it warm.
-- Continuity: build on what was just said; ask follow-ups that feel like the next natural question.
+- Style: short paragraphs, natural flow (avoid rigid bullets). Small emoji anchors (💧 🤱 💤 ⚠️) sparingly.
+- Continuity: build on what was said; ask 1–2 genuine follow-ups.
 - If evidence is weak, say so and suggest safer swaps.
-- Only advise consulting a provider if the ingredient is clearly risky, not as a generic disclaimer.
-- Always add 1–2 context-aware follow-up questions (e.g., about meds, symptoms, goals). They should feel like invitations to continue, not generic.
-- No retailer links. If an ingredient is mentioned, you may allude to healthai.com/clarity/<slug>.
-- If an ingredient has cross-reactivity with other foods or compounds, explicitly fill "cross_reactivity" with a concise note (e.g., "goat’s milk, sheep’s milk").
-- **Proactive cross-reactivity:** Whenever you provide a verdict, ALWAYS fill "cross_reactivity" with 1–2 concise notes about common interactions or contextual factors. 
-   Examples:
-   • Collagen → mention vitamin C as a cofactor.
-   • Iron → note calcium interference.
-   • Peppermint, sage, fenugreek → mention milk supply.
-   • High histamine foods/supplements → flag DAO/mast cell sensitivity.
-   • Interactions with thyroid meds, SSRIs, diuretics.
-   Do not overwhelm: just highlight the most relevant or common.
-- Citations: When possible, include a simple “based on available research” with a PubMed reference or DB slug.
+- Only advise consulting a provider when clearly warranted (not boilerplate).
+- If an ingredient has cross-reactivity, fill "cross_reactivity" succinctly (e.g., "vitamin C cofactor", "calcium interferes with iron", "high histamine → DAO/mast cell sensitivity").
+- No retailer links. You may allude to healthai.com/clarity/<slug>.
 
 Return JSON only:
-
 {
   "mode": "ingredient" | "wellness",
   "title": "string",
@@ -192,6 +209,7 @@ async function logInteraction({ request_id, user_query, history, kind, model_res
 
 /* -------------------------- main handler --------------------------- */
 export default async function handler(req, res) {
+  // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -201,67 +219,55 @@ export default async function handler(req, res) {
   const request_id = makeRequestId();
 
   try {
-    const { message, history } = req.body || {};
+    const { message, history, page } = req.body || {};
     if (!message || typeof message !== "string") {
       return res.status(400).json({ error: "Missing message in body" });
     }
 
     const baseFromUser = baseIngredientFromMessage(message);
 
-    /* ----------------------- (ADDED) optional pagination params ----------------------- */
-    // NOTE: This is additive; it does NOT remove your existing query below.
-    // If a client sends { page: 2 }, we’ll use a paginated query; otherwise we keep your original query.
+    /* ----------------------- Optional pagination ----------------------- */
     const PAGE_SIZE = 20;
-    const pageParam = Number.isInteger(req.body?.page) ? req.body.page : null;
-    const from = pageParam ? (pageParam - 1) * PAGE_SIZE : null;
-    const to = pageParam ? (from + PAGE_SIZE - 1) : null;
+    const pageNum = Number.isInteger(page) && page > 0 ? page : null;
+    const from = pageNum ? (pageNum - 1) * PAGE_SIZE : null;
+    const to = pageNum ? (from + PAGE_SIZE - 1) : null;
 
-    /* ----------------------- Supabase lookup (your original query) ----------------------- */
-    const { data, error } = await supabase
+    /* ----------------------- Supabase lookup ----------------------- */
+    // Base (non-paginated) lookup for quick hit
+    const baseQuery = supabase
       .from("ingredients_variants")
-      .select("name, verdict, dao_histamine_signal, cycle_flag, cycle_notes, citations, cross_reactivity")
+      .select(
+        "id, name, verdict, dao_histamine_signal, cycle_flag, cycle_notes, citations, cross_reactivity, hormone_modulation_note, dao_mechanism, dao_notes, trust_signals, confidence, source_type"
+      )
       .ilike("name", `%${message}%`)
       .limit(5);
 
-    if (error) console.error("Supabase error:", error);
+    const { data: quick, error: quickError } = await baseQuery;
+    if (quickError) console.error("Supabase quick error:", quickError);
 
-    /* ----------------------- (ADDED) Paginated lookup if page provided ----------------------- */
-    let paged = null;
-    let pagedError = null;
-    let totalPlanned = null;
-
-    if (pageParam) {
-      const pagedResult = await supabase
+    // Paginated (if requested)
+    let paged = null, totalPlanned = null, pagedError = null;
+    if (pageNum) {
+      const pagedRes = await supabase
         .from("ingredients_variants")
-        .select("id, name, verdict, dao_histamine_signal, cycle_flag, cycle_notes, citations, cross_reactivity", { count: "planned" })
+        .select(
+          "id, name, verdict, dao_histamine_signal, cycle_flag, cycle_notes, citations, cross_reactivity, hormone_modulation_note, dao_mechanism, dao_notes, trust_signals, confidence, source_type",
+          { count: "planned" }
+        )
         .ilike("name", `%${message}%`)
-        .order("name")           // stable order for pagination
-        .range(from, to);        // use calculated window
+        .order("name", { ascending: true })
+        .range(from, to);
 
-      paged = pagedResult.data || null;
-      pagedError = pagedResult.error || null;
-      totalPlanned = pagedResult.count ?? null;
-
+      paged = pagedRes.data || null;
+      totalPlanned = pagedRes.count ?? null;
+      pagedError = pagedRes.error || null;
       if (pagedError) console.error("Supabase paginated error:", pagedError);
     }
 
-    // Decide which dataset to use for the response:
-    const dataToUse = (Array.isArray(paged) && paged.length) ? paged : data;
+    const dataset = (Array.isArray(paged) && paged.length) ? paged : quick;
 
-    if (dataToUse && dataToUse.length) {
-      const primary = dataToUse[0];
-      const dao = primary.dao_histamine_signal || "Unknown";
-      const cycle = primary.cycle_flag || "N/A";
-
-      const record = {
-        name: primary.name,
-        verdict: primary.verdict,
-        dao,
-        cycle,
-        cycle_notes: primary.cycle_notes || "",
-        citations: Array.isArray(primary.citations) ? primary.citations : (primary.citations ? [primary.citations] : []),
-        cross_reactivity: primary.cross_reactivity || ""
-      };
+    if (dataset && dataset.length) {
+      const primary = normalizeRecord(dataset[0]);
 
       const verdictNormalized = normalizeVerdict(primary.verdict);
       const base = primary.name || baseFromUser;
@@ -275,18 +281,17 @@ export default async function handler(req, res) {
         verdict_normalized: verdictNormalized,
         show_chip: Boolean(verdictNormalized),
         hide_fields: {
-          dao: dao === "Unknown",
-          cycle: cycle === "N/A"
+          dao: primary.dao === "unspecified",
+          cycle: primary.cycle === "unspecified"
         },
         engagement: buildEngagement(verdictNormalized, "ingredient"),
         followups: buildFollowups(base, verdictNormalized, "ingredient"),
-        cross_reactivity: record.cross_reactivity
+        cross_reactivity: primary.cross_reactivity
       };
 
-      // (ADDED) include pagination metadata only when page was provided
-      if (pageParam) {
+      if (pageNum) {
         ui.pagination = {
-          current_page: pageParam,
+          current_page: pageNum,
           page_size: PAGE_SIZE,
           total_count: totalPlanned
         };
@@ -297,11 +302,11 @@ export default async function handler(req, res) {
         user_query: message,
         history,
         kind: "db",
-        model_response: record,
+        model_response: primary,
         ui
       });
 
-      return res.status(200).json({ kind: "db", record, ui });
+      return res.status(200).json({ kind: "db", record: primary, ui });
     }
 
     /* ------------------------- GPT fallback ------------------------ */
