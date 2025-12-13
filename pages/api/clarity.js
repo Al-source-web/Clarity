@@ -208,6 +208,12 @@ async function logInteraction({ request_id, user_query, history, kind, model_res
 }
 
 /* -------------------------- main handler --------------------------- */
+function withTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((resolve) => setTimeout(resolve, ms)),
+  ]);
+}
 export default async function handler(req, res) {
   // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -225,14 +231,17 @@ export default async function handler(req, res) {
     }
 
     // EARLY LOG — counts every user interaction even if DB logic fails later
-void logInteraction({
-  request_id,
-  user_query: message,
-  history: Array.isArray(history) ? history.slice(-8) : history,
-  kind: "request",
-  model_response: null,
-  ui: null,
-});
+await withTimeout(
+  logInteraction({
+    request_id,
+    user_query: message,
+    history: Array.isArray(history) ? history.slice(-8) : history,
+    kind: "request",
+    model_response: null,
+    ui: null,
+  }),
+  200
+);
     
     const baseFromUser = baseIngredientFromMessage(message);
 
