@@ -224,6 +224,16 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing message in body" });
     }
 
+    // EARLY LOG — counts every user interaction even if DB logic fails later
+void logInteraction({
+  request_id,
+  user_query: message,
+  history: Array.isArray(history) ? history.slice(-8) : history,
+  kind: "request",
+  model_response: null,
+  ui: null,
+});
+    
     const baseFromUser = baseIngredientFromMessage(message);
 
     /* ----------------------- Optional pagination ----------------------- */
