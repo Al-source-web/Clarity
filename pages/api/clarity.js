@@ -258,7 +258,7 @@ await withTimeout(
       .select(
         "id, name, verdict, dao_histamine_signal, cycle_flag, cycle_notes, citations, cross_reactivity, hormone_modulation_note, dao_mechanism, dao_notes, trust_signals, confidence, source_type"
       )
-      .ilike("name", `%${message}%`)
+      .ilike("name", `%${baseFromUser}%`)
       .limit(5);
 
     const { data: quick, error: quickError } = await baseQuery;
@@ -273,7 +273,7 @@ await withTimeout(
           "id, name, verdict, dao_histamine_signal, cycle_flag, cycle_notes, citations, cross_reactivity, hormone_modulation_note, dao_mechanism, dao_notes, trust_signals, confidence, source_type",
           { count: "planned" }
         )
-        .ilike("name", `%${message}%`)
+        .ilike("name", `%${baseFromUser}%`)
         .order("name", { ascending: true })
         .range(from, to);
 
