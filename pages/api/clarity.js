@@ -211,7 +211,6 @@ new Promise((resolve) => setTimeout(resolve, ms)),
 ]);
 }
 
-/* ========================= FEEDBACK HANDLER ========================= */
 async function handleFeedback(req, res) {
 const { request_id, feedback, user_query, verdict } = req.body || {};
 if (!request_id || !feedback) return res.status(400).json({ error: “Missing request_id or feedback” });
@@ -243,11 +242,10 @@ return res.status(500).json({ error: “Failed to save feedback” });
 }
 }
 
-/* ========================= LOAD MORE HANDLER ========================= */
 async function handleLoadMore(req, res) {
 const { ingredient, page } = req.body || {};
 if (!ingredient || typeof ingredient !== “string”) {
-return res.status(400).json({ error: “Missing ingredient name for load more” });
+return res.status(400).json({ error: “Missing ingredient name” });
 }
 const pageNum = Number.isInteger(page) && page > 1 ? page : 2;
 const PAGE_SIZE = 20;
@@ -263,10 +261,7 @@ const { data, count, error } = await supabase
 .ilike(“name”, `%${ingredient}%`)
 .order(“name”, { ascending: true })
 .range(from, to);
-if (error) {
-console.error(“Load more DB error:”, error);
-return res.status(500).json({ error: “Database error”, details: error.message });
-}
+if (error) return res.status(500).json({ error: “Database error”, details: error.message });
 return res.status(200).json({
 kind: “loadmore”,
 records: (data || []).map(normalizeRecord),
@@ -278,7 +273,6 @@ has_more: (from + PAGE_SIZE) < (count ?? 0)
 }
 });
 } catch (e) {
-console.error(“handleLoadMore error:”, e?.message || e);
 return res.status(500).json({ error: “Server error”, details: e.message });
 }
 }
@@ -428,6 +422,7 @@ logInteraction({
 });
 
 return res.status(200).json({ kind: "gpt", answer, ui, request_id });
+
 } catch (err) {
 console.error(“Handler error:”, err);
 return res.status(500).json({ error: “Server error”, details: err.message, request_id });
