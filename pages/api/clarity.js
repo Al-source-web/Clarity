@@ -301,7 +301,6 @@ if (!message || typeof message !== “string”) {
 return res.status(400).json({ error: “Missing message in body” });
 }
 
-```
 await withTimeout(
   logInteraction({
     request_id,
@@ -429,7 +428,6 @@ logInteraction({
 });
 
 return res.status(200).json({ kind: "gpt", answer, ui, request_id });
-
 } catch (err) {
 console.error(“Handler error:”, err);
 return res.status(500).json({ error: “Server error”, details: err.message, request_id });
