@@ -13,7 +13,7 @@ return s.toLowerCase().normalize(“NFKD”).replace(/[^\w\s-]/g, “”).trim()
 
 function baseIngredientFromMessage(q = “”) {
 if (!q) return “”;
-const first = q.split(/[-—:]/)[0].trim();
+const first = q.split(/[—:]/)[0].trim();
 const words = first.split(/\s+/).filter(Boolean);
 return words.length <= 3 ? first : words.slice(0, 3).join(” “);
 }
@@ -114,7 +114,7 @@ Guidelines:
 
 - Tone: warm, conversational, supportive. Empathetic when user is anxious. Evidence-based but human.
 - Style: short paragraphs, natural flow (avoid rigid bullets). Small emoji anchors (💧 🤱 💤 ⚠️) sparingly.
-- Continuity: build on what was said; ask 1–2 genuine follow-ups.
+- Continuity: build on what was said; ask 1-2 genuine follow-ups.
 - If evidence is weak, say so and suggest safer swaps.
 - Only advise consulting a provider when clearly warranted (not boilerplate).
 - If an ingredient has cross-reactivity, fill “cross_reactivity” succinctly.
@@ -166,7 +166,7 @@ title: message.trim().slice(0,60) || “Guidance”,
 verdict: null,
 friendly: “I don’t have a perfect answer yet, but I can think it through with you 💭”,
 scientific: “”,
-closing: “You’re doing a lot — I’m here to help make this easier 💚”,
+closing: “You’re doing a lot – I’m here to help make this easier 💚”,
 followups: [“Want me to suggest safer alternatives?”, “Should we adjust this around your meds or sleep?”],
 cross_reactivity: “”
 };
@@ -281,13 +281,13 @@ res.setHeader(“Access-Control-Allow-Headers”, “Content-Type”);
 if (req.method === “OPTIONS”) return res.status(200).end();
 if (req.method !== “POST”) return res.status(405).json({ error: “Method not allowed” });
 
-// ── feedback ──────────────────────────────────────────────────────
+// – feedback ——————————————————
 if (req.query?.action === “feedback”) return handleFeedback(req, res);
 
-// ── load more ─────────────────────────────────────────────────────
+// – load more —————————————————–
 if (req.query?.action === “loadmore”) return handleLoadMore(req, res);
 
-// ── main query ────────────────────────────────────────────────────
+// – main query ––––––––––––––––––––––––––
 const request_id = makeRequestId();
 
 try {
@@ -297,7 +297,7 @@ return res.status(400).json({ error: “Missing message in body” });
 }
 
 ```
-// EARLY LOG — counts every query even if later steps fail
+// EARLY LOG -- counts every query even if later steps fail
 await withTimeout(
   logInteraction({
     request_id,
