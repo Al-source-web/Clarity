@@ -429,7 +429,6 @@ logInteraction({
 });
 
 return res.status(200).json({ kind: "gpt", answer, ui, request_id });
-```
 
 } catch (err) {
 console.error(“Handler error:”, err);
