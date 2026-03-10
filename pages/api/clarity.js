@@ -187,16 +187,18 @@ async function callGPTJSON(message, history = []) {
 
 async function logInteraction({ request_id, user_query, history, kind, model_response, ui }) {
   try {
-    await supabase.from("clarity_interactions").insert([
-      {
-        request_id,
-        user_query,
-        history: toModelHistory(history),
-        kind,
-        model_response,
-        ui
-      }
-    ]);
+    await supabase.from("clarity_interactions").insert([{
+      request_id,
+      user_query,
+      history:        JSON.stringify(toModelHistory(history)),
+      kind,
+      model_response: model_response !== null && model_response !== undefined
+                        ? JSON.stringify(model_response)
+                        : null,
+      ui:             ui !== null && ui !== undefined
+                        ? JSON.stringify(ui)
+                        : null,
+    }]);
   } catch (e) {
     console.error("logInteraction error:", e?.message || e);
   }
