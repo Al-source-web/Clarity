@@ -129,21 +129,7 @@ function ensureArray(v) {
   return [v];
 }
 
-// All columns selected from ingredients_variants
-const DB_SELECT = [
-  "id", "name", "verdict",
-  // legacy signal columns (kept for backwards compat)
-  "dao_histamine_signal", "cycle_flag", "cycle_notes",
-  "dao_mechanism", "dao_notes",
-  // enriched columns
-  "histamine_liberator", "histamine_severity",
-  "dao_inhibitor", "dao_severity",
-  "cycle_sensitivity_flag", "cycle_phase_caution", "cycle_sensitivity_notes",
-  // metadata
-  "citations", "cross_reactivity", "hormone_modulation_note",
-  "trust_signals", "confidence", "source_type",
-  "lactation_safety", "ui_flag", "category"
-].join(", ");
+const DB_SELECT = "id, name, verdict, dao_histamine_signal, dao_mechanism, dao_notes, histamine_liberator, histamine_severity, dao_inhibitor, dao_severity, cycle_sensitivity_flag, cycle_phase_caution, cycle_sensitivity_notes, trust_signals, source_type, lactation_safety, ui_flag, category";
 
 function normalizeRecord(record = {}) {
   // Build a human-readable histamine note from enriched columns
