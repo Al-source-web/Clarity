@@ -426,7 +426,7 @@ export default async function handler(req, res) {
       200
     );
 
-    const baseFromUser = baseIngredientFromMessage(message);
+    const baseFromUser = message.trim().toLowerCase().replace(/[?!.]+$/, "").trim();
 
     const PAGE_SIZE = 20;
     const pageNum = Number.isInteger(page) && page > 0 ? page : null;
@@ -436,7 +436,6 @@ export default async function handler(req, res) {
     const baseQuery = supabase
       .from("ingredients_variants")
       .select(DB_SELECT)
-      console.log("DB query for:", baseFromUser);
       .ilike("name", `%${baseFromUser}%`)
       .limit(5);
 
