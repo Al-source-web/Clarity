@@ -436,6 +436,7 @@ export default async function handler(req, res) {
     const baseQuery = supabase
       .from("ingredients_variants")
       .select(DB_SELECT)
+      console.log("DB query for:", baseFromUser);
       .ilike("name", `%${baseFromUser}%`)
       .limit(5);
 
