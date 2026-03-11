@@ -80,13 +80,12 @@ function buildFollowups(base = "", verdict = null, mode = "ingredient") {
 function toModelHistory(raw = []) {
   if (!Array.isArray(raw)) return [];
   const MAX_TURNS = 3;
-  const TRIMMED = raw.slice(-MAX_TURNS).map(m => {
+  return raw.slice(-MAX_TURNS).map(m => {
     const role = m?.role === "assistant" ? "assistant" : "user";
     let content = (m?.content || "").toString();
     if (content.length > 3000) content = content.slice(0, 3000) + "…";
     return { role, content };
   });
-  return TRIMMED;
 }
 
 function makeRequestId() {
@@ -99,14 +98,76 @@ function ensureArray(v) {
   return [v];
 }
 
+// All columns selected from ingredients_variants
+const DB_SELECT = [
+  "id", "name", "verdict",
+  // legacy signal columns (kept for backwards compat)
+  "dao_histamine_signal", "cycle_flag", "cycle_notes",
+  "dao_mechanism", "dao_notes",
+  // enriched columns
+  "histamine_liberator", "histamine_severity",
+  "dao_inhibitor", "dao_severity",
+  "cycle_sensitivity_flag", "cycle_phase_caution", "cycle_sensitivity_notes",
+  // metadata
+  "citations", "cross_reactivity", "hormone_modulation_note",
+  "trust_signals", "confidence", "source_type",
+  "lactation_safety", "ui_flag", "category"
+].join(", ");
+
 function normalizeRecord(record = {}) {
+  // Build a human-readable histamine note from enriched columns
+  const histLib   = record.histamine_liberator;
+  const histSev   = record.histamine_severity;
+  const daoInh    = record.dao_inhibitor;
+  const daoSev    = record.dao_severity;
+
+  let histamine_note = null;
+  if (histLib === "true" && histSev) {
+    histamine_note = `${histSev} histamine content`;
+  } else if (histLib === "false" && histSev === "Low") {
+    histamine_note = "Low histamine — generally well tolerated";
+  }
+
+  let dao_note = null;
+  if (daoInh === "true") {
+    dao_note = `DAO inhibitor (${daoSev || "moderate"} effect) — reduces histamine breakdown`;
+  } else if (daoInh === "false") {
+    dao_note = "Does not inhibit DAO enzyme";
+  }
+
+  // Cycle sensitivity
+  const cycleFlag   = record.cycle_sensitivity_flag;
+  const cycleCaution = record.cycle_phase_caution || "";
+  const cycleNotes  = record.cycle_sensitivity_notes || "";
+
+  let cycle_note = null;
+  if (cycleFlag === "1" && cycleCaution) {
+    cycle_note = `Use with caution during: ${cycleCaution}`;
+  } else if (cycleNotes) {
+    cycle_note = cycleNotes;
+  }
+
   return {
     id: record.id,
     name: record.name || "Unknown",
     verdict: record.verdict || "unknown",
+    category: record.category || null,
+    // enriched signal fields
+    histamine_liberator: histLib || null,
+    histamine_severity: histSev || null,
+    histamine_note,
+    dao_inhibitor: daoInh || null,
+    dao_severity: daoSev || null,
+    dao_note,
+    cycle_sensitivity_flag: cycleFlag || null,
+    cycle_phase_caution: cycleCaution || null,
+    cycle_sensitivity_notes: cycleNotes || null,
+    cycle_note,
+    // legacy (kept so existing frontend doesn't break)
     dao: record.dao_histamine_signal || "unspecified",
     cycle: record.cycle_flag || "unspecified",
-    cycle_notes: record.cycle_notes || "unspecified",
+    cycle_notes_legacy: record.cycle_notes || "unspecified",
+    // metadata
     citations: ensureArray(record.citations),
     cross_reactivity: ensureArray(record.cross_reactivity),
     hormone_modulation_note: record.hormone_modulation_note || "unspecified",
@@ -114,7 +175,9 @@ function normalizeRecord(record = {}) {
     dao_notes: record.dao_notes || "unspecified",
     trust_signals: record.trust_signals || "weak",
     confidence: typeof record.confidence === "number" ? record.confidence : 0.0,
-    source_type: record.source_type || "unspecified"
+    source_type: record.source_type || "unspecified",
+    lactation_safety: record.lactation_safety || null,
+    ui_flag: record.ui_flag || null,
   };
 }
 
@@ -146,6 +209,30 @@ Return JSON only:
 `.trim();
 }
 
+function buildDBPrompt(message, record) {
+  // Build a rich context string from enriched DB fields so GPT can write
+  // a warm, specific response rather than a generic one
+  const parts = [`Ingredient: ${record.name}`, `Verdict: ${record.verdict}`];
+  if (record.histamine_note)  parts.push(`Histamine: ${record.histamine_note}`);
+  if (record.dao_note)        parts.push(`DAO: ${record.dao_note}`);
+  if (record.cycle_note)      parts.push(`Cycle sensitivity: ${record.cycle_note}`);
+  if (record.dao_mechanism && record.dao_mechanism !== "unspecified")
+    parts.push(`Mechanism: ${record.dao_mechanism}`);
+  if (record.dao_notes && record.dao_notes !== "unspecified")
+    parts.push(`Notes: ${record.dao_notes}`);
+
+  return `User question: ${message}
+
+Database record:
+${parts.join("\n")}
+
+Write a warm, specific response using the data above.
+Mention histamine and cycle sensitivity naturally if relevant — do not ignore them.
+Rules:
+- mode: "ingredient", verdict: "${record.verdict}"
+- Use empathetic tone, short paragraphs, emojis. No numbered lists.`;
+}
+
 function buildUserPrompt(message) {
   return `User question: ${message}
 Rules:
@@ -154,11 +241,15 @@ Rules:
 - Use empathetic tone, short paragraphs, emojis. No numbered lists.`.trim();
 }
 
-async function callGPTJSON(message, history = []) {
+async function callGPTJSON(message, history = [], dbRecord = null) {
+  const userPrompt = dbRecord
+    ? buildDBPrompt(message, dbRecord)
+    : buildUserPrompt(message);
+
   const messages = [
     { role: "system", content: buildSystemPrompt() },
     ...toModelHistory(history),
-    { role: "user", content: buildUserPrompt(message) }
+    { role: "user", content: userPrompt }
   ];
 
   const completion = await openai.chat.completions.create({
@@ -254,10 +345,7 @@ async function handleLoadMore(req, res) {
   try {
     const { data, count, error } = await supabase
       .from("ingredients_variants")
-      .select(
-        "id, name, verdict, dao_histamine_signal, cycle_flag, cycle_notes, citations, cross_reactivity, hormone_modulation_note, dao_mechanism, dao_notes, trust_signals, confidence, source_type",
-        { count: "planned" }
-      )
+      .select(DB_SELECT, { count: "planned" })
       .ilike("name", `%${ingredient}%`)
       .order("name", { ascending: true })
       .range(from, to);
@@ -306,7 +394,7 @@ export default async function handler(req, res) {
       }),
       200
     );
-    
+
     const baseFromUser = baseIngredientFromMessage(message);
 
     const PAGE_SIZE = 20;
@@ -316,9 +404,7 @@ export default async function handler(req, res) {
 
     const baseQuery = supabase
       .from("ingredients_variants")
-      .select(
-        "id, name, verdict, dao_histamine_signal, cycle_flag, cycle_notes, citations, cross_reactivity, hormone_modulation_note, dao_mechanism, dao_notes, trust_signals, confidence, source_type"
-      )
+      .select(DB_SELECT)
       .ilike("name", `%${baseFromUser}%`)
       .limit(5);
 
@@ -329,10 +415,7 @@ export default async function handler(req, res) {
     if (pageNum) {
       const pagedRes = await supabase
         .from("ingredients_variants")
-        .select(
-          "id, name, verdict, dao_histamine_signal, cycle_flag, cycle_notes, citations, cross_reactivity, hormone_modulation_note, dao_mechanism, dao_notes, trust_signals, confidence, source_type",
-          { count: "planned" }
-        )
+        .select(DB_SELECT, { count: "planned" })
         .ilike("name", `%${baseFromUser}%`)
         .order("name", { ascending: true })
         .range(from, to);
@@ -347,10 +430,18 @@ export default async function handler(req, res) {
 
     if (dataset && dataset.length) {
       const primary = normalizeRecord(dataset[0]);
-
       const verdictNormalized = normalizeVerdict(primary.verdict);
       const base = primary.name || baseFromUser;
-      const article_url = primary.name ? `https://healthai.com/clarity/${slugifyForClarityPath(primary.name)}` : null;
+      const article_url = primary.name
+        ? `https://healthai.com/clarity/${slugifyForClarityPath(primary.name)}`
+        : null;
+
+      // Call GPT with the enriched DB record so it writes a specific, rich response
+      const j = await callGPTJSON(message, history || [], primary);
+      const friendly  = j.friendly?.trim() || "";
+      const scientific = j.scientific?.trim() ? `\n\n${j.scientific.trim()}` : "";
+      const closing   = j.closing?.trim() ? `\n\n${j.closing.trim()}` : "";
+      const answer    = `${j.title}\n\n${friendly}${scientific}${closing}`.trim();
 
       const ui = {
         mode: "ingredient",
@@ -359,13 +450,20 @@ export default async function handler(req, res) {
         article_url,
         verdict_normalized: verdictNormalized,
         show_chip: Boolean(verdictNormalized),
+        // surface enriched signal fields to frontend
+        histamine_note: primary.histamine_note,
+        dao_note: primary.dao_note,
+        cycle_note: primary.cycle_note,
         hide_fields: {
-          dao: primary.dao === "unspecified",
-          cycle: primary.cycle === "unspecified"
+          dao:      !primary.dao_note,
+          cycle:    !primary.cycle_note,
+          histamine: !primary.histamine_note,
         },
         engagement: buildEngagement(verdictNormalized, "ingredient"),
         followups: buildFollowups(base, verdictNormalized, "ingredient"),
-        cross_reactivity: primary.cross_reactivity
+        cross_reactivity: primary.cross_reactivity,
+        lactation_safety: primary.lactation_safety,
+        ui_flag: primary.ui_flag,
       };
 
       if (pageNum) {
@@ -385,19 +483,23 @@ export default async function handler(req, res) {
         ui
       });
 
-      return res.status(200).json({ kind: "db", record: primary, ui, request_id });
+      // Return both the structured record AND the GPT-enriched answer
+      return res.status(200).json({ kind: "db", record: primary, answer, ui, request_id });
     }
 
+    // No DB hit — pure GPT fallback
     const j = await callGPTJSON(message, history || []);
 
-    const friendly = j.friendly?.trim() || "";
+    const friendly  = j.friendly?.trim() || "";
     const scientific = j.scientific?.trim() ? `\n\n${j.scientific.trim()}` : "";
-    const closing = j.closing?.trim() ? `\n\n${j.closing.trim()}` : "";
-    const answer = `${j.title}\n\n${friendly}${scientific}${closing}`.trim();
+    const closing   = j.closing?.trim() ? `\n\n${j.closing.trim()}` : "";
+    const answer    = `${j.title}\n\n${friendly}${scientific}${closing}`.trim();
 
     const verdictNormalized = j.mode === "ingredient" ? normalizeVerdict(j.verdict) : null;
     const base = j.mode === "ingredient" ? baseIngredientFromMessage(j.title || message) : baseFromUser;
-    const article_url = j.mode === "ingredient" ? `https://healthai.com/clarity/${slugifyForClarityPath(j.title||message)}` : null;
+    const article_url = j.mode === "ingredient"
+      ? `https://healthai.com/clarity/${slugifyForClarityPath(j.title || message)}`
+      : null;
 
     const ui = {
       mode: j.mode,
@@ -406,7 +508,10 @@ export default async function handler(req, res) {
       article_url,
       verdict_normalized: verdictNormalized,
       show_chip: j.mode === "ingredient" && Boolean(verdictNormalized),
-      hide_fields: { dao: true, cycle: true },
+      histamine_note: null,
+      dao_note: null,
+      cycle_note: null,
+      hide_fields: { dao: true, cycle: true, histamine: true },
       engagement: buildEngagement(verdictNormalized, j.mode),
       followups: buildFollowups(base, verdictNormalized, j.mode),
       cross_reactivity: j.cross_reactivity || ""
